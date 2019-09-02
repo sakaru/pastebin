@@ -1,83 +1,74 @@
 package main
 
 import (
-  "net/http"
-  "io/ioutil"
-  "regexp"
-  "math/rand"
-  "fmt"
-  "time"
-  "github.com/go-redis/redis"
+	"fmt"
+	"github.com/go-redis/redis"
+	"github.com/gorilla/mux"
+	"io/ioutil"
+	"math/rand"
+	"net/http"
+	"time"
 )
 
-const validCharacters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890-"
-const length = 6
+const snippetValidCharacters = "abcdefghijklmnopqrstuvwxyz" +
+	"ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890-"
+const snippetLength = 6
 
-func createSnippetName() string {
-  r := rand.New(rand.NewSource(time.Now().UnixNano()))
-  b := make([]byte, length)
-  for i := range b {
-    b[i] = validCharacters[r.Intn(len(validCharacters))]
-  }
-  return string(b)
+var redisClient *redis.Client
+
+func StringWithCharset(length int, charset string) string {
+	var seededRand *rand.Rand = rand.New(rand.NewSource(time.Now().UnixNano()))
+	b := make([]byte, length)
+	for i := range b {
+		b[i] = charset[seededRand.Intn(len(charset))]
+	}
+	return string(b)
 }
 
 func viewHandler(w http.ResponseWriter, r *http.Request) {
-  fmt.Print("GET ")
-  var validPath = regexp.MustCompile("^/v/([a-zA-Z0-9-]+)$")
-  m := validPath.FindStringSubmatch(r.URL.Path)
-  if m == nil {
-    http.NotFound(w, r)
-    fmt.Println("[invalid-url]")
-    return
-  }
-  snippet := m[1]
+	parameters := mux.Vars(r)
 
+	p, e := redisClient.Get(parameters["snippet"]).Bytes()
 
-  p, e := client.Get(snippet).Bytes()
-
-  if e != nil {
-    http.NotFound(w, r)
-    fmt.Println("[not-found]")
-    return
-  }
-  fmt.Println(snippet, "[OK]")
-  w.Write(p)
+	if e != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Write(p)
 }
 
 func saveHandler(w http.ResponseWriter, r *http.Request) {
-  r.ParseMultipartForm(5368709120) // 5MB
-  file, _, err := r.FormFile("body")
+	r.ParseMultipartForm(5368709120) // 5MB
+	file, _, err := r.FormFile("body")
 
+	if err != nil {
+		http.Error(w, "Must include payload, curl -F body=@foo.txt", 400)
+		return
+	}
 
-  if err != nil {
-    fmt.Println("[invalid]")
-    http.Error(w, "Must include file upload", 400)
-    return
-  }
+	body, _ := ioutil.ReadAll(file)
+	snippet := StringWithCharset(snippetLength, snippetValidCharacters)
 
-  body, _ := ioutil.ReadAll(file)
-
-  snippet := createSnippetName()
-
-  client.Set(snippet, body, 0)
-  fmt.Println("SET ", snippet)
-  w.WriteHeader(http.StatusCreated)
-  s := fmt.Sprintf("See http://%v/v/%v \n", r.Host, snippet)
-  w.Write([]byte(s))
+	redisClient.Set(snippet, body, 0)
+	w.WriteHeader(http.StatusCreated)
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	s := fmt.Sprintf("%v://%v/%v \n", scheme, r.Host, snippet)
+	w.Write([]byte(s))
 }
 
-var client *redis.Client
-
 func main() {
-  client = redis.NewClient(&redis.Options{
-    Addr:     "localhost:6379",
-    Password: "", // no password set
-    DB:       0,  // use default DB
-  })
+	redisClient = redis.NewClient(&redis.Options{
+		Addr:     "localhost:6379",
+		Password: "", // no password set
+		DB:       0,  // use default DB
+	})
 
-  http.HandleFunc("/v/", viewHandler)
-  http.HandleFunc("/s",  saveHandler)
+	r := mux.NewRouter()
+	r.HandleFunc("/{snippet:[a-zA-Z0-9-]+$}", viewHandler).Methods("GET")
+	r.HandleFunc("/", saveHandler).Methods("POST")
 
-  http.ListenAndServe(":8080", nil)
+	http.ListenAndServe(":8080", r)
 }
