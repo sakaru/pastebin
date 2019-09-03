@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"math/rand"
 	"net/http"
+	"os"
 	"time"
 )
 
@@ -15,6 +16,7 @@ const snippetValidCharacters = "abcdefghijklmnopqrstuvwxyz" +
 const snippetLength = 6
 
 var redisClient *redis.Client
+var baseURL string
 
 func StringWithCharset(length int, charset string) string {
 	var seededRand *rand.Rand = rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -42,7 +44,7 @@ func saveHandler(w http.ResponseWriter, r *http.Request) {
 	file, _, err := r.FormFile("body")
 
 	if err != nil {
-		http.Error(w, "Must include payload, curl -F body=@foo.txt", 400)
+		http.Error(w, "Must include payload; curl -F body=@foo.txt", 400)
 		return
 	}
 
@@ -51,24 +53,39 @@ func saveHandler(w http.ResponseWriter, r *http.Request) {
 
 	redisClient.Set(snippet, body, 0)
 	w.WriteHeader(http.StatusCreated)
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
+	s := ""
+	if baseURL != "" {
+		s = fmt.Sprintf("%v/%v\n", baseURL, snippet)
+	} else {
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+		s = fmt.Sprintf("%v://%v/%v\n", scheme, r.Host, snippet)
 	}
-	s := fmt.Sprintf("%v://%v/%v \n", scheme, r.Host, snippet)
 	w.Write([]byte(s))
 }
 
 func main() {
+	baseURL = os.Getenv("BASE_URL")
+	redisAddr, ok := os.LookupEnv("REDIS_ADDR")
+	redisPassword := os.Getenv("REDIS_PASSWORD")
+	if !ok {
+		redisAddr = "localhost:6379"
+	}
 	redisClient = redis.NewClient(&redis.Options{
-		Addr:     "localhost:6379",
-		Password: "", // no password set
-		DB:       0,  // use default DB
+		Addr:     redisAddr,
+		Password: redisPassword,
+		DB:       0,
 	})
 
 	r := mux.NewRouter()
 	r.HandleFunc("/{snippet:[a-zA-Z0-9-]+$}", viewHandler).Methods("GET")
 	r.HandleFunc("/", saveHandler).Methods("POST")
 
-	http.ListenAndServe(":8080", r)
+	listenOn, ok := os.LookupEnv("LISTEN_ON")
+	if !ok {
+		listenOn = ":8080"
+	}
+	http.ListenAndServe(listenOn, r)
 }
